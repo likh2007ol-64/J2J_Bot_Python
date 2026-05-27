@@ -1,65 +1,132 @@
 import asyncio
+import io
 import logging
 import os
-import struct
-import zlib
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Cache of uploaded attachment strings
 _attachments: dict[str, str] = {}
 
 ROBOT_IMAGES = {
     "greeting": "robot_greeting.png",
     "thinking": "robot_thinking.png",
-    "happy": "robot_happy.png",
-    "sad": "robot_sad.png",
+    "happy":    "robot_happy.png",
+    "sad":      "robot_sad.png",
 }
 
 
-def _create_minimal_png(color_rgb: tuple[int, int, int] = (100, 149, 237), size: int = 64) -> bytes:
-    """Create a minimal valid PNG image with given color."""
-    def make_png(width, height, rgb):
-        def crc(data):
-            return struct.pack('>I', zlib.crc32(data) & 0xffffffff)
-
-        def chunk(ctype, data):
-            return struct.pack('>I', len(data)) + ctype + data + crc(ctype + data)
-
-        # Signature
-        sig = b'\x89PNG\r\n\x1a\n'
-        # IHDR
-        ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-        ihdr = chunk(b'IHDR', ihdr_data)
-        # IDAT
-        raw_data = b''
-        for _ in range(height):
-            raw_data += b'\x00' + bytes(rgb) * width
-        compressed = zlib.compress(raw_data)
-        idat = chunk(b'IDAT', compressed)
-        # IEND
-        iend = chunk(b'IEND', b'')
-        return sig + ihdr + idat + iend
-
-    return make_png(size, size, color_rgb)
-
-
 def ensure_static_images(static_dir: str):
-    """Create placeholder PNG files if they don't exist."""
+    """Create proper placeholder images via Pillow if they don't exist."""
+    from PIL import Image, ImageDraw, ImageFont
+
     os.makedirs(static_dir, exist_ok=True)
-    colors = {
-        "robot_greeting.png": (70, 130, 180),   # steel blue
-        "robot_thinking.png": (255, 165, 0),     # orange
-        "robot_happy.png": (50, 205, 50),        # green
-        "robot_sad.png": (220, 20, 60),          # crimson
+
+    placeholders = {
+        "robot_greeting.png": ((70,  130, 180), "👋"),
+        "robot_thinking.png": ((255, 165,   0), "🤔"),
+        "robot_happy.png":    ((50,  205,  50), "✅"),
+        "robot_sad.png":      ((220,  20,  60), "😕"),
     }
-    for fname, color in colors.items():
+
+    for fname, (color, emoji) in placeholders.items():
         fpath = os.path.join(static_dir, fname)
         if not os.path.exists(fpath):
-            with open(fpath, "wb") as f:
-                f.write(_create_minimal_png(color))
-            logger.info("Created placeholder: %s", fpath)
+            img = Image.new("RGB", (256, 256), color=color)
+            draw = ImageDraw.Draw(img)
+            # Draw a simple label in the center
+            text = f"J2J\n{emoji}"
+            draw.text((128, 128), text, fill=(255, 255, 255), anchor="mm")
+            img.save(fpath, format="PNG")
+            logger.info("Created Pillow placeholder: %s (%dx%d)", fpath, *img.size)
+
+
+def _prepare_image_buffer(image_path: str, max_size: int = 256) -> io.BytesIO:
+    """
+    Open image, resize to max_size keeping aspect ratio,
+    save as JPEG (quality=90) into a BytesIO buffer.
+    """
+    from PIL import Image
+
+    img = Image.open(image_path).convert("RGB")
+    orig_w, orig_h = img.size
+    img.thumbnail((max_size, max_size), Image.LANCZOS)
+    new_w, new_h = img.size
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+
+    logger.info(
+        "Prepared %s: orig=%dx%d → %dx%d, JPEG size=%d bytes",
+        os.path.basename(image_path), orig_w, orig_h, new_w, new_h, buf.getbuffer().nbytes,
+    )
+    return buf
+
+
+async def _upload_single_image(bot, image_path: str) -> Optional[str]:
+    """Upload a single image to VK messages. Returns 'photo{owner_id}_{id}' or None."""
+    fname = os.path.basename(image_path)
+    try:
+        import aiohttp
+        api = bot.api
+
+        # Step 1 — get upload server
+        upload_server_resp = await api.photos.get_messages_upload_server(peer_id=0)
+        upload_url = upload_server_resp.upload_url
+        logger.info("[%s] Upload server URL: %s", fname, upload_url)
+
+        # Step 2 — prepare resized JPEG buffer (no disk write)
+        image_buf = await asyncio.to_thread(_prepare_image_buffer, image_path, 256)
+
+        # Step 3 — POST file to VK upload server
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field(
+                "photo", image_buf,
+                filename=fname.replace(".png", ".jpg"),
+                content_type="image/jpeg",
+            )
+            async with session.post(upload_url, data=form) as resp:
+                upload_result = await resp.json(content_type=None)
+
+        logger.info("[%s] VK upload server response: %s", fname, upload_result)
+
+        server = upload_result.get("server")
+        photo  = upload_result.get("photo")
+        hash_  = upload_result.get("hash")
+
+        if not photo or photo == "[]":
+            logger.error("[%s] VK rejected the file — 'photo' field empty: %s", fname, upload_result)
+            return None
+
+        # Step 4 — save photo via VK API
+        saved = await api.photos.save_messages_photo(
+            photo=photo,
+            server=server,
+            hash=hash_,
+        )
+        logger.info("[%s] photos.saveMessagesPhoto response: %s", fname, saved)
+
+        if not saved:
+            logger.error("[%s] saveMessagesPhoto returned empty list", fname)
+            return None
+
+        photo_obj = saved[0]
+        owner_id  = photo_obj.owner_id
+        media_id  = photo_obj.id
+
+        if not media_id:
+            logger.error("[%s] media_id is 0 or missing in saved photo object: %s", fname, photo_obj)
+            return None
+
+        attachment = f"photo{owner_id}_{media_id}"
+        logger.info("[%s] ✅ attachment string: %s", fname, attachment)
+        return attachment
+
+    except Exception as e:
+        logger.error("[%s] Upload failed: %s", fname, e, exc_info=True)
+        return None
 
 
 async def upload_images_to_vk(bot, static_dir: str):
@@ -69,74 +136,15 @@ async def upload_images_to_vk(bot, static_dir: str):
     for key, fname in ROBOT_IMAGES.items():
         fpath = os.path.join(static_dir, fname)
         if not os.path.exists(fpath):
-            logger.warning("Image not found: %s", fpath)
+            logger.warning("Image file not found: %s", fpath)
             continue
-        try:
-            attachment = await _upload_single_image(bot, fpath)
-            if attachment:
-                _attachments[key] = attachment
-                logger.info("Uploaded %s → %s", fname, attachment)
-            else:
-                logger.warning("Failed to upload %s", fname)
-        except Exception as e:
-            logger.error("Error uploading %s: %s", fname, e)
 
-
-def _resize_image(image_path: str, max_size: int = 512) -> "io.BytesIO":
-    """Open image, resize so the longest side <= max_size, return PNG BytesIO buffer."""
-    import io
-    from PIL import Image
-    img = Image.open(image_path)
-    orig_w, orig_h = img.size
-    img.thumbnail((max_size, max_size), Image.LANCZOS)
-    new_w, new_h = img.size
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    logger.info("Resized %s: %dx%d → %dx%d", os.path.basename(image_path), orig_w, orig_h, new_w, new_h)
-    return buf
-
-
-async def _upload_single_image(bot, image_path: str) -> Optional[str]:
-    """Upload a single image to VK messages (resized), return attachment string."""
-    try:
-        import aiohttp
-        api = bot.api
-
-        # Get upload server URL (peer_id=0 works for community bots)
-        upload_server = await api.photos.get_messages_upload_server(peer_id=0)
-        upload_url = upload_server.upload_url
-
-        # Resize image to max 512px before uploading
-        image_buf = await asyncio.to_thread(_resize_image, image_path, 512)
-
-        # Upload resized image from buffer
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field(
-                "photo", image_buf,
-                filename=os.path.basename(image_path),
-                content_type="image/png"
-            )
-            async with session.post(upload_url, data=form) as resp:
-                result = await resp.json(content_type=None)
-
-        if "photo" not in result:
-            logger.error("VK upload response missing 'photo' key: %s", result)
-            return None
-
-        # Save photo
-        saved = await api.photos.save_messages_photo(
-            photo=result["photo"],
-            server=result["server"],
-            hash=result["hash"],
-        )
-        if saved:
-            photo = saved[0]
-            return f"photo{photo.owner_id}_{photo.id}"
-    except Exception as e:
-        logger.error("VK upload error for %s: %s", image_path, e)
-    return None
+        attachment = await _upload_single_image(bot, fpath)
+        if attachment:
+            _attachments[key] = attachment
+            logger.info("Cached [%s] → %s", key, attachment)
+        else:
+            logger.warning("Could not upload [%s] — messages will be text-only", key)
 
 
 def get_attachment(key: str) -> Optional[str]:
