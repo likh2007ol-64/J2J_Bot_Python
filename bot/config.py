@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 VK_TOKEN = os.environ.get("VK_TOKEN", "")
+VK_GROUP_ID = int(os.environ.get("VK_GROUP_ID", "0"))
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "0").split(",") if x.strip()]
 
