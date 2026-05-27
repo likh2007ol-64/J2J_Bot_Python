@@ -82,8 +82,23 @@ async def upload_images_to_vk(bot, static_dir: str):
             logger.error("Error uploading %s: %s", fname, e)
 
 
+def _resize_image(image_path: str, max_size: int = 512) -> "io.BytesIO":
+    """Open image, resize so the longest side <= max_size, return PNG BytesIO buffer."""
+    import io
+    from PIL import Image
+    img = Image.open(image_path)
+    orig_w, orig_h = img.size
+    img.thumbnail((max_size, max_size), Image.LANCZOS)
+    new_w, new_h = img.size
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    logger.info("Resized %s: %dx%d → %dx%d", os.path.basename(image_path), orig_w, orig_h, new_w, new_h)
+    return buf
+
+
 async def _upload_single_image(bot, image_path: str) -> Optional[str]:
-    """Upload a single image to VK messages, return attachment string."""
+    """Upload a single image to VK messages (resized), return attachment string."""
     try:
         import aiohttp
         api = bot.api
@@ -92,13 +107,19 @@ async def _upload_single_image(bot, image_path: str) -> Optional[str]:
         upload_server = await api.photos.get_messages_upload_server(peer_id=0)
         upload_url = upload_server.upload_url
 
-        # Upload file
+        # Resize image to max 512px before uploading
+        image_buf = await asyncio.to_thread(_resize_image, image_path, 512)
+
+        # Upload resized image from buffer
         async with aiohttp.ClientSession() as session:
-            with open(image_path, "rb") as f:
-                form = aiohttp.FormData()
-                form.add_field("photo", f, filename=os.path.basename(image_path), content_type="image/png")
-                async with session.post(upload_url, data=form) as resp:
-                    result = await resp.json(content_type=None)
+            form = aiohttp.FormData()
+            form.add_field(
+                "photo", image_buf,
+                filename=os.path.basename(image_path),
+                content_type="image/png"
+            )
+            async with session.post(upload_url, data=form) as resp:
+                result = await resp.json(content_type=None)
 
         if "photo" not in result:
             logger.error("VK upload response missing 'photo' key: %s", result)

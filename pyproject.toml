@@ -8,6 +8,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "chromadb>=1.5.9",
     "nest-asyncio>=1.6.0",
+    "pillow>=12.2.0",
     "pypdf>=6.12.2",
     "python-dotenv>=1.2.2",
     "vkbottle>=4.8.2",
