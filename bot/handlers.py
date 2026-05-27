@@ -31,29 +31,6 @@ ABOUT_TEXT = (
 )
 
 
-def _build_fallback_answer(question: str, chunks: list[dict], error_msg: str) -> str:
-    """Build a fallback answer from RAG chunks when DeepSeek is unavailable."""
-    lines = [
-        error_msg,
-        "",
-        f"Тем не менее, вот что я нашёл в учебниках по запросу «{question}»:",
-        "",
-    ]
-    for i, chunk in enumerate(chunks[:3], 1):
-        meta = chunk.get("metadata", {})
-        title = meta.get("book_title", "Неизвестно")
-        page = meta.get("page", "?")
-        text = chunk["text"]
-        if len(text) > 400:
-            text = text[:400] + "…"
-        lines.append(f"📖 [{i}] {title}, стр. {page}:")
-        lines.append(text)
-        lines.append("")
-    result = "\n".join(lines).strip()
-    if len(result) > 4000:
-        result = result[:3990] + "\n…(обрезано)"
-    return result
-
 
 async def _send_thinking(bot, peer_id: int):
     thinking_attach = images.get_attachment("thinking")
@@ -158,22 +135,19 @@ async def _handle_question(message, bot, question: str, peer_id: int):
         answer = await deepseek.ask_deepseek_rag(question, chunks)
 
         if answer is None:
-            # Should not happen (chunks were non-empty), but guard anyway
             await bot.api.messages.send(
                 peer_id=peer_id,
-                message="Сервис ответов временно недоступен, попробуйте позже.",
+                message="Источник временно не доступен.",
                 attachment=sad_attach,
                 random_id=0,
             )
             return
 
         if deepseek.is_api_error(answer):
-            # DeepSeek unavailable — show RAG chunks as fallback
-            error_msg = deepseek.api_error_message(answer)
-            fallback = _build_fallback_answer(question, chunks, error_msg)
+            logger.error("DeepSeek API error code: %s", answer)
             await bot.api.messages.send(
                 peer_id=peer_id,
-                message=fallback,
+                message="Источник временно не доступен.",
                 attachment=sad_attach,
                 random_id=0,
             )
