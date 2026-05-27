@@ -11,7 +11,8 @@ from vkbottle.polling import BotPolling
 import database
 import images
 import handlers
-from config import VK_TOKEN, VK_GROUP_ID, STATIC_DIR, KNOWLEDGE_ROOT
+import knowledge
+from config import VK_TOKEN, VK_GROUP_ID, STATIC_DIR, KNOWLEDGE_ROOT, CHROMA_DIR, EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,6 +85,19 @@ def main():
 
         if os.path.exists(KNOWLEDGE_ROOT):
             logger.info("Knowledge root: %s", KNOWLEDGE_ROOT)
+            pdf_files = [f for f in os.listdir(KNOWLEDGE_ROOT) if f.lower().endswith(".pdf")]
+            if pdf_files:
+                chunk_count = await knowledge.get_chunk_count(CHROMA_DIR)
+                if chunk_count == 0:
+                    logger.info("Found %d PDF(s), indexing knowledge base...", len(pdf_files))
+                    books, chunks = await knowledge.index_knowledge_base(
+                        KNOWLEDGE_ROOT, CHROMA_DIR, EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP
+                    )
+                    logger.info("✅ Indexed %d book(s), %d chunks", books, chunks)
+                else:
+                    logger.info("Knowledge base already has %d chunks — skipping re-index (use /reload_knowledge to force)", chunk_count)
+            else:
+                logger.info("No PDFs in knowledge root yet — add files and run /reload_knowledge")
         else:
             logger.warning("Knowledge root not found: %s — add PDFs and run /reload_knowledge", KNOWLEDGE_ROOT)
 
