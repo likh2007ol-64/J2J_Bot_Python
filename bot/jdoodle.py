@@ -9,6 +9,49 @@ JDOODLE_CREDIT_URL = "https://api.jdoodle.com/v1/credit-spent"
 
 JDOODLE_JAVA_VERSION = "4"  # Java 17
 
+_WRAPPER_TEMPLATE = (
+    "public class Main {{\n"
+    "    public static void main(String[] args) {{\n"
+    "        {body}\n"
+    "    }}\n"
+    "}}"
+)
+
+_METHOD_WRAPPER_TEMPLATE = (
+    "public class Main {{\n"
+    "{body}\n"
+    "}}"
+)
+
+
+def _prepare_code(code: str) -> str:
+    """Ensure code is a valid JDoodle submission.
+
+    Rules:
+    - If code already has `public class` → use as-is
+    - If code has `class` but not `public class` → prepend `public `
+    - If code looks like method(s) (contains `static`) but no class → wrap in class
+    - Otherwise → wrap in public class Main with main method
+    """
+    stripped = code.strip()
+
+    # Already a complete public class
+    if "public class" in stripped:
+        return stripped
+
+    # Has a class declaration but missing public
+    if "class " in stripped and "{" in stripped:
+        return "public " + stripped
+
+    # Contains method definitions (has `static` + `{`) but no class wrapper
+    if "static" in stripped and "void" in stripped and "{" in stripped:
+        return _METHOD_WRAPPER_TEMPLATE.format(body=stripped)
+
+    # Bare statements — wrap in main method
+    # Indent each line
+    indented = "\n        ".join(stripped.splitlines())
+    return _WRAPPER_TEMPLATE.format(body=indented)
+
 
 async def execute_java_code(code: str) -> dict:
     """Execute Java code via JDoodle API.
@@ -30,16 +73,18 @@ async def execute_java_code(code: str) -> dict:
             "service_error": True,
         }
 
+    prepared = _prepare_code(code)
     payload = {
         "clientId": JDOODLE_CLIENT_ID,
         "clientSecret": JDOODLE_CLIENT_SECRET,
-        "script": code,
+        "script": prepared,
         "language": "java",
         "versionIndex": JDOODLE_JAVA_VERSION,
     }
 
     key_preview = JDOODLE_CLIENT_ID[:6] + "..."
-    logger.info("JDoodle request → clientId: %s | plan: %s | code_len: %d", key_preview, JDOODLE_PLAN, len(code))
+    logger.info("JDoodle request → clientId: %s | plan: %s | original_len: %d | prepared_len: %d",
+                key_preview, JDOODLE_PLAN, len(code), len(prepared))
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -79,12 +124,15 @@ async def execute_java_code(code: str) -> dict:
                     }
 
                 # Compilation / runtime error detection: JDoodle puts error info in output
+                error_markers = (
+                    "error:", "Error:", "Exception", "error\n",
+                    "compilation error", "Main.java:", ".java:",
+                    "No \"public class\"", "cannot find symbol",
+                    "illegal start", "reached end of file",
+                )
                 has_error = (
                     jd_status not in (200, None) or
-                    any(marker in output for marker in (
-                        "error:", "Error:", "Exception", "error\n",
-                        "compilation error", "Main.java:"
-                    ))
+                    any(marker in output for marker in error_markers)
                 )
 
                 logger.info("JDoodle result → has_error: %s | output_len: %d", has_error, len(output))
