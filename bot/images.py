@@ -130,7 +130,11 @@ async def _upload_single_image(bot, image_path: str) -> Optional[str]:
 
 
 async def upload_images_to_vk(bot, static_dir: str):
-    """Upload all robot images to VK and cache attachment strings."""
+    """Upload all robot images to VK and cache attachment strings.
+
+    Uploads are done sequentially with a 3-second gap to avoid VK rate limits.
+    Each image gets up to 3 attempts before giving up.
+    """
     global _attachments
 
     for key, fname in ROBOT_IMAGES.items():
@@ -139,12 +143,25 @@ async def upload_images_to_vk(bot, static_dir: str):
             logger.warning("Image file not found: %s", fpath)
             continue
 
-        attachment = await _upload_single_image(bot, fpath)
+        attachment = None
+        for attempt in range(1, 4):
+            if attempt > 1:
+                wait = attempt * 3
+                logger.info("[%s] Retry %d/%d — waiting %ds...", fname, attempt, 3, wait)
+                await asyncio.sleep(wait)
+            attachment = await _upload_single_image(bot, fpath)
+            if attachment:
+                break
+            logger.warning("[%s] Upload attempt %d failed", fname, attempt)
+
         if attachment:
             _attachments[key] = attachment
             logger.info("Cached [%s] → %s", key, attachment)
         else:
-            logger.warning("Could not upload [%s] — messages will be text-only", key)
+            logger.warning("Could not upload [%s] after 3 attempts — messages will be text-only", key)
+
+        # Pause between images to avoid VK rate limiting
+        await asyncio.sleep(3)
 
 
 def get_attachment(key: str) -> Optional[str]:
