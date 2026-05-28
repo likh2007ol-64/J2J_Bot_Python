@@ -28,6 +28,12 @@ async def init_db():
                 created_at TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS jdoodle_limits (
+                date TEXT PRIMARY KEY,
+                count INTEGER DEFAULT 0
+            )
+        """)
         # Insert default row if not exists
         await db.execute("""
             INSERT OR IGNORE INTO library_stats (id, book_count, chunk_count)
@@ -63,5 +69,49 @@ async def log_operation(operation: str, details: str = ""):
         await db.execute(
             "INSERT INTO operation_log (operation, details, created_at) VALUES (?, ?, ?)",
             (operation, details, now)
+        )
+        await db.commit()
+
+
+def _today_utc() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+async def get_jdoodle_count() -> int:
+    """Return how many JDoodle requests have been made today (UTC)."""
+    today = _today_utc()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT count FROM jdoodle_limits WHERE date=?", (today,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def increment_jdoodle_count() -> int:
+    """Increment today's JDoodle request counter. Returns new count."""
+    today = _today_utc()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO jdoodle_limits (date, count) VALUES (?, 1) "
+            "ON CONFLICT(date) DO UPDATE SET count = count + 1",
+            (today,)
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT count FROM jdoodle_limits WHERE date=?", (today,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 1
+
+
+async def reset_jdoodle_count() -> None:
+    """Force-reset today's JDoodle counter to 0."""
+    today = _today_utc()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO jdoodle_limits (date, count) VALUES (?, 0) "
+            "ON CONFLICT(date) DO UPDATE SET count = 0",
+            (today,)
         )
         await db.commit()

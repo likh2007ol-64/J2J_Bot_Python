@@ -9,7 +9,11 @@ from vkbottle.bot import Message
 import database
 import knowledge
 import images
-from config import ADMIN_IDS, KNOWLEDGE_ROOT, CHROMA_DIR, EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP, STATIC_DIR
+from config import (
+    ADMIN_IDS, KNOWLEDGE_ROOT, CHROMA_DIR, EMBEDDING_MODEL,
+    CHUNK_SIZE, CHUNK_OVERLAP, STATIC_DIR,
+    JDOODLE_PLAN, JDOODLE_FREE_LIMIT, JDOODLE_ENABLED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,9 @@ def admin_keyboard() -> Keyboard:
     kb.row()
     kb.add(Text("📂 Показать файлы", payload={"cmd": "list_files"}), color=KeyboardButtonColor.SECONDARY)
     kb.add(Text("ℹ️ Статус библиотеки", payload={"cmd": "status"}), color=KeyboardButtonColor.SECONDARY)
+    kb.row()
+    kb.add(Text("🖥 JDoodle: статус", payload={"cmd": "jdoodle_status"}), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("♻️ JDoodle: сброс лимита", payload={"cmd": "reset_jdoodle_limit"}), color=KeyboardButtonColor.NEGATIVE)
     return kb
 
 
@@ -60,6 +67,14 @@ async def handle_admin_command(message: Message, bot) -> bool:
 
     if text == "/status" or text == "ℹ️ статус библиотеки":
         await _do_status(message, bot)
+        return True
+
+    if text == "/jdoodle_status" or text == "🖥 jdoodle: статус":
+        await _do_jdoodle_status(message, bot)
+        return True
+
+    if text == "/reset_jdoodle_limit" or text == "♻️ jdoodle: сброс лимита":
+        await _do_reset_jdoodle_limit(message, bot)
         return True
 
     if text.startswith("/delete_file "):
@@ -135,7 +150,6 @@ async def _do_list_files(message: Message, bot, path_arg: str):
     base = KNOWLEDGE_ROOT
     target = os.path.normpath(os.path.join(base, path_arg)) if path_arg else base
 
-    # Security: don't allow going above KNOWLEDGE_ROOT
     if not target.startswith(base):
         target = base
 
@@ -185,6 +199,54 @@ async def _do_status(message: Message, bot):
     await bot.api.messages.send(
         peer_id=message.peer_id,
         message=text,
+        random_id=0,
+    )
+
+
+async def _do_jdoodle_status(message: Message, bot):
+    if not JDOODLE_ENABLED:
+        await bot.api.messages.send(
+            peer_id=message.peer_id,
+            message=(
+                "🖥 JDoodle: не настроен\n"
+                "Добавьте в Secrets Replit:\n"
+                "  JDODDLE_CLIENT_ID\n"
+                "  JDODDLE_CLIENT_SECRET\n"
+                "  JDODDLE_PLAN (free / pro)"
+            ),
+            random_id=0,
+        )
+        return
+
+    count = await database.get_jdoodle_count()
+    if JDOODLE_PLAN == "pro":
+        limit_str = "unlimited (pro)"
+        remaining = "∞"
+    else:
+        limit_str = str(JDOODLE_FREE_LIMIT)
+        remaining = str(max(0, JDOODLE_FREE_LIMIT - count))
+
+    text = (
+        f"🖥 JDoodle статус\n\n"
+        f"📋 Тариф: {JDOODLE_PLAN}\n"
+        f"📊 Использовано сегодня: {count}\n"
+        f"🔢 Лимит: {limit_str}\n"
+        f"✅ Осталось: {remaining}\n"
+        f"🔄 Сброс: в 00:00 UTC"
+    )
+    await bot.api.messages.send(
+        peer_id=message.peer_id,
+        message=text,
+        random_id=0,
+    )
+
+
+async def _do_reset_jdoodle_limit(message: Message, bot):
+    await database.reset_jdoodle_count()
+    await database.log_operation("reset_jdoodle_limit")
+    await bot.api.messages.send(
+        peer_id=message.peer_id,
+        message="♻️ Счётчик запросов JDoodle сброшен до 0.",
         random_id=0,
     )
 

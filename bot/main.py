@@ -12,7 +12,11 @@ import database
 import images
 import handlers
 import knowledge
-from config import VK_TOKEN, VK_GROUP_ID, STATIC_DIR, KNOWLEDGE_ROOT, CHROMA_DIR, EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP
+from config import (
+    VK_TOKEN, VK_GROUP_ID, STATIC_DIR, KNOWLEDGE_ROOT,
+    CHROMA_DIR, EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP,
+    JDOODLE_ENABLED, JDOODLE_PLAN, JDOODLE_FREE_LIMIT,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,14 +105,24 @@ def main():
         else:
             logger.warning("Knowledge root not found: %s — add PDFs and run /reload_knowledge", KNOWLEDGE_ROOT)
 
+        # JDoodle startup check
+        if JDOODLE_ENABLED:
+            limit_info = "unlimited (pro)" if JDOODLE_PLAN == "pro" else f"{JDOODLE_FREE_LIMIT} запросов/сутки"
+            logger.info("JDoodle: enabled | plan: %s | limit: %s", JDOODLE_PLAN, limit_info)
+        else:
+            logger.warning(
+                "JDoodle: NOT configured — /run и /explain будут недоступны. "
+                "Добавьте JDODDLE_CLIENT_ID, JDODDLE_CLIENT_SECRET, JDODDLE_PLAN в Secrets."
+            )
+
         logger.info("Bot ready. Listening for messages...")
         print(
-            "\n✅ Фаза 1 бота J2J_Bot (Python) запущена.\n"
-            "   - RAG (ChromaDB + эмбеддинги + DeepSeek), управление библиотекой, визуальный персонаж.\n"
-            "   - /run и /explain — заглушка.\n"
-            "   - Для BotHost: задайте VK_TOKEN, DEEPSEEK_API_KEY, ADMIN_IDS, VK_GROUP_ID;\n"
-            "     загрузите папку Литература в /app/shared/; выполните /reload_knowledge.\n"
-            "   - Замените static/*.png на реальные PNG-изображения робота.\n"
+            "\n✅ Вторая фаза (JDoodle + страховка) добавлена.\n"
+            "   - Бот выполняет Java-код через JDoodle, при ошибке генерирует эталон через DeepSeek.\n"
+            f"   - Лимит для free: {JDOODLE_FREE_LIMIT} запросов/сутки, счётчик в SQLite.\n"
+            "   - Команды /jdoodle_status и /reset_jdoodle_limit доступны администратору.\n"
+            "   - Для тестирования отправьте боту /run с кодом или ошибочный код в блоке ```java.\n"
+            f"   - JDoodle: {'✅ настроен (' + JDOODLE_PLAN + ')' if JDOODLE_ENABLED else '⚠️ не настроен'}\n"
         )
 
     bot.loop_wrapper.add_task(startup())

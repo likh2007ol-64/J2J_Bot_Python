@@ -25,6 +25,13 @@ if not os.path.exists(os.path.dirname(DB_PATH)):
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
+# JDoodle (note: env vars intentionally spelled "JDODDLE" per user setup)
+JDOODLE_CLIENT_ID = os.environ.get("JDODDLE_CLIENT_ID", "")
+JDOODLE_CLIENT_SECRET = os.environ.get("JDODDLE_CLIENT_SECRET", "")
+JDOODLE_PLAN = os.environ.get("JDODDLE_PLAN", "free").lower().strip()
+JDOODLE_FREE_LIMIT = 20
+JDOODLE_ENABLED = bool(JDOODLE_CLIENT_ID and JDOODLE_CLIENT_SECRET)
+
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
