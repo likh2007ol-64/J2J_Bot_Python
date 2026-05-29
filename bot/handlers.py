@@ -18,29 +18,40 @@ from config import (
 logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "Привет! Я Java-робот 🤖\n"
+    "Привет! Я Java-робот\n"
     "Помогаю студентам JUMP2JAVA с теорией и кодом.\n\n"
     "Команды:\n"
     "/start, /help — это меню\n"
     "/about — информация о боте\n"
     "/run <код> — выполнить Java-код\n"
     "/explain <задача> — получить эталонное решение\n\n"
-    "Или просто задай вопрос по Java — отвечу по учебникам."
+    "Или просто задай вопрос по Java — отвечу по учебникам.\n\n"
+    "Код можно отправить и без /run — просто вставь его в тройные бэктики:\n"
+    "```java\n"
+    "System.out.println(\"Hello\");\n"
+    "```"
 )
 
 ABOUT_TEXT = (
-    "🤖 J2J_Bot — учебный ассистент по Java\n"
+    "J2J_Bot — учебный ассистент по Java\n"
     "Версия: 2.0 (теория + проверка кода)\n"
     "Сообщество: Jump2Java\n\n"
-    "• Отвечает на вопросы по Java на основе учебников\n"
-    "• Выполняет Java-код через JDoodle\n"
-    "• При ошибке — показывает эталон через DeepSeek AI\n"
+    "Отвечает на вопросы по Java на основе учебников\n"
+    "Выполняет Java-код через JDoodle\n"
+    "При ошибке — показывает эталон через DeepSeek AI\n"
     "Технологии: RAG + DeepSeek AI + ChromaDB + JDoodle"
 )
 
 # Regex to extract ```java ... ``` or ``` ... ``` code blocks
+# Handles both Unix (\n) and Windows (\r\n) line endings
 _CODE_BLOCK_RE = re.compile(
-    r"```(?:java)?\s*\n?(.*?)```",
+    r"```(?:java)?\s*[\r\n]+(.*?)[\r\n]*```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Fallback: single-line code block  ```java code ```
+_CODE_BLOCK_INLINE_RE = re.compile(
+    r"```(?:java)?\s*(.*?)```",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -50,8 +61,8 @@ def _extract_code(text: str) -> str | None:
 
     Priority:
     1. /run <code> — everything after the command
-    2. ```java ... ``` block
-    3. ``` ... ``` block
+    2. ```java\\n...\\n``` block (multi-line)
+    3. ```...``` block (inline / no language tag)
     Returns None if no code found.
     """
     stripped = text.strip()
@@ -62,8 +73,15 @@ def _extract_code(text: str) -> str | None:
         if code:
             return code
 
-    # Triple-backtick block
+    # Multi-line triple-backtick block (primary)
     match = _CODE_BLOCK_RE.search(stripped)
+    if match:
+        code = match.group(1).strip()
+        if code:
+            return code
+
+    # Inline / compact block (fallback)
+    match = _CODE_BLOCK_INLINE_RE.search(stripped)
     if match:
         code = match.group(1).strip()
         if code:
@@ -72,11 +90,16 @@ def _extract_code(text: str) -> str | None:
     return None
 
 
+def _has_code_block(text: str) -> bool:
+    """Return True if the message contains a triple-backtick code block."""
+    return "```" in text
+
+
 async def _send_thinking(bot, peer_id: int):
     thinking_attach = images.get_attachment("thinking")
     await bot.api.messages.send(
         peer_id=peer_id,
-        message="Секунду, думаю… 🤔",
+        message="Секунду, думаю...",
         attachment=thinking_attach,
         random_id=0,
     )
@@ -108,7 +131,13 @@ async def handle_message(message, bot):
     user_id = message.from_id
     lower = text.lower()
 
-    # Admin commands first
+    # Log every incoming message to help debug routing
+    logger.info(
+        "MSG from_id=%s peer_id=%s is_admin=%s text=%r",
+        user_id, peer_id, adm.is_admin(user_id), text[:120],
+    )
+
+    # Admin commands first (checked by text AND payload)
     if adm.is_admin(user_id):
         handled = await adm.handle_admin_command(message, bot)
         if handled:
@@ -144,10 +173,14 @@ async def handle_message(message, bot):
         await _handle_explain(message, bot, text, peer_id)
         return
 
-    # Code block in message (without /run)
-    if _extract_code(text) is not None and not lower.startswith("/"):
-        await _handle_run(message, bot, text, peer_id)
-        return
+    # Code block in message (without /run command)
+    # Check for ``` before calling the full regex to avoid unnecessary work
+    if _has_code_block(text) and not lower.startswith("/"):
+        code = _extract_code(text)
+        if code:
+            logger.info("Auto-detected code block (no /run) from user %s", user_id)
+            await _handle_run(message, bot, text, peer_id)
+            return
 
     # Unknown slash command
     if text.startswith("/"):
@@ -229,12 +262,12 @@ async def _handle_run(message, bot, text: str, peer_id: int):
 
     output = result["output"] or "(нет вывода)"
     if len(output) > 1500:
-        output = output[:1500] + "\n…(вывод обрезан)"
+        output = output[:1500] + "\n...(вывод обрезан)"
 
     if not result["error"]:
         # Success
         await _send_happy(bot, peer_id,
-            f"✅ Код выполнен без ошибок. Молодец!\n\n📤 Вывод программы:\n{output}"
+            f"Код выполнен без ошибок. Молодец!\n\nВывод программы:\n{output}"
         )
         return
 
@@ -242,7 +275,7 @@ async def _handle_run(message, bot, text: str, peer_id: int):
     await bot.api.messages.send(
         peer_id=peer_id,
         message=(
-            f"❌ Ошибка:\n{output}\n\n"
+            f"Ошибка:\n{output}\n\n"
             "Ниже — правильное решение с объяснением, чтобы ты мог разобраться."
         ),
         attachment=images.get_attachment("sad"),
@@ -261,7 +294,7 @@ async def _handle_run(message, bot, text: str, peer_id: int):
 
     if fix:
         if len(fix) > 4000:
-            fix = fix[:3990] + "\n…(обрезано)"
+            fix = fix[:3990] + "\n...(обрезано)"
         await bot.api.messages.send(
             peer_id=peer_id,
             message=fix,
@@ -305,7 +338,7 @@ async def _handle_explain(message, bot, text: str, peer_id: int):
         return
 
     if len(answer) > 4000:
-        answer = answer[:3990] + "\n…(обрезано)"
+        answer = answer[:3990] + "\n...(обрезано)"
 
     await bot.api.messages.send(
         peer_id=peer_id,
@@ -357,7 +390,7 @@ async def _handle_question(message, bot, question: str, peer_id: int):
             return
 
         if len(answer) > 4000:
-            answer = answer[:3990] + "\n…(ответ обрезан)"
+            answer = answer[:3990] + "\n...(ответ обрезан)"
 
         await _send_happy(bot, peer_id, answer)
 
