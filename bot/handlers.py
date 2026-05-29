@@ -56,6 +56,31 @@ _CODE_BLOCK_INLINE_RE = re.compile(
 )
 
 
+def _normalize_text(text: str) -> str:
+    """Normalize VK message text: replace <br> variants with newlines, strip excess whitespace."""
+    # VK sometimes replaces newlines with <br> tags
+    t = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    # Collapse multiple blank lines to one
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    return t.strip()
+
+
+# Keywords that indicate Java code even without backtick fences
+_JAVA_CODE_HINTS = re.compile(
+    r'\b(public\s+class|public\s+static\s+void\s+main|System\.out\.print|'
+    r'import\s+java\.|class\s+\w+\s*\{|new\s+\w+\s*\()',
+    re.IGNORECASE,
+)
+
+
+def _looks_like_java_code(text: str) -> bool:
+    """Heuristic: does this text look like Java source code?"""
+    # Must have both braces and at least one Java keyword
+    has_braces = '{' in text and '}' in text
+    has_keyword = bool(_JAVA_CODE_HINTS.search(text))
+    return has_braces and has_keyword
+
+
 def _extract_code(text: str) -> str | None:
     """Extract Java code from message text.
 
@@ -126,7 +151,9 @@ async def _send_happy(bot, peer_id: int, text: str):
 
 
 async def handle_message(message, bot):
-    text = (message.text or "").strip()
+    # Normalize first: replace VK's <br> line-break substitutions with real newlines
+    raw_text = (message.text or "").strip()
+    text = _normalize_text(raw_text)
     peer_id = message.peer_id
     user_id = message.from_id
     lower = text.lower()
@@ -134,8 +161,10 @@ async def handle_message(message, bot):
     # Log every incoming message to help debug routing
     logger.info(
         "MSG from_id=%s peer_id=%s is_admin=%s text=%r",
-        user_id, peer_id, adm.is_admin(user_id), text[:120],
+        user_id, peer_id, adm.is_admin(user_id), text[:150],
     )
+    if raw_text != text:
+        logger.info("Text normalized (had <br> tags): %r -> %r", raw_text[:80], text[:80])
 
     # Admin commands first (checked by text AND payload)
     if adm.is_admin(user_id):
@@ -173,13 +202,27 @@ async def handle_message(message, bot):
         await _handle_explain(message, bot, text, peer_id)
         return
 
-    # Code block in message (without /run command)
-    # Check for ``` before calling the full regex to avoid unnecessary work
+    # Code block in message (without /run command): ```java ... ``` or ``` ... ```
     if _has_code_block(text) and not lower.startswith("/"):
         code = _extract_code(text)
         if code:
-            logger.info("Auto-detected code block (no /run) from user %s", user_id)
+            logger.info("Auto-detected backtick code block from user %s", user_id)
             await _handle_run(message, bot, text, peer_id)
+            return
+
+    # Heuristic: message starts with "java" prefix (e.g. "java<br>public class...")
+    # or contains recognizable Java constructs without backticks
+    if not lower.startswith("/"):
+        # Strip a leading "java" word that VK prepends when the user types ```java
+        # and VK collapses the fence into plain text
+        java_stripped = re.sub(r'^java\s*', '', text, flags=re.IGNORECASE).strip()
+        if _looks_like_java_code(java_stripped):
+            logger.info("Auto-detected bare Java code (java-prefix heuristic) from user %s", user_id)
+            await _handle_run(message, bot, text, peer_id, preextracted_code=java_stripped)
+            return
+        if _looks_like_java_code(text):
+            logger.info("Auto-detected bare Java code (no-prefix heuristic) from user %s", user_id)
+            await _handle_run(message, bot, text, peer_id, preextracted_code=text)
             return
 
     # Unknown slash command
@@ -201,8 +244,12 @@ async def handle_message(message, bot):
 
 # ─── /run handler ────────────────────────────────────────────────────────────
 
-async def _handle_run(message, bot, text: str, peer_id: int):
-    """Execute Java code via JDoodle."""
+async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: str | None = None):
+    """Execute Java code via JDoodle.
+
+    If preextracted_code is given it is used directly; otherwise code is
+    extracted from text via _extract_code().
+    """
 
     # Check if JDoodle is configured
     if not JDOODLE_ENABLED:
@@ -215,8 +262,8 @@ async def _handle_run(message, bot, text: str, peer_id: int):
         )
         return
 
-    # Extract code
-    code = _extract_code(text)
+    # Use pre-extracted code if supplied, otherwise extract from text
+    code = preextracted_code or _extract_code(text)
     if not code:
         await _send_sad(bot, peer_id,
             "Пожалуйста, отправьте код на Java после команды /run "
