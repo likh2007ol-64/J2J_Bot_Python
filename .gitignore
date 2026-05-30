@@ -1,13 +1,7 @@
 __pycache__/
 *.pyc
 .env
-bot/__pycache__/
-bot/knowledge/*.pdf
-books/
+bot/data/chroma_db/
 *.db
 *.sqlite
-.replit
-.upm/
-.pythonlibs/
-node_modules/
-bot/data/chroma_db/
+.DS_Store
