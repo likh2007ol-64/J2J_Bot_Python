@@ -118,10 +118,19 @@ async def execute_java_code(code: str) -> dict:
                     return {
                         "output": output,
                         "error": False,
+                        "timeout": False,
                         "message": "limit_exceeded",
                         "limit_exceeded": True,
                         "service_error": False,
                     }
+
+                # Timeout detection: JDoodle reports TLE in the output text
+                timeout_markers = (
+                    "Time Limit Exceeded",
+                    "time limit exceeded",
+                    "TimeLimitExceeded",
+                )
+                has_timeout = any(m in output for m in timeout_markers)
 
                 # Compilation / runtime error detection: JDoodle puts error info in output
                 error_markers = (
@@ -135,11 +144,15 @@ async def execute_java_code(code: str) -> dict:
                     any(marker in output for marker in error_markers)
                 )
 
-                logger.info("JDoodle result → has_error: %s | output_len: %d", has_error, len(output))
+                logger.info(
+                    "JDoodle result → has_error: %s | has_timeout: %s | output_len: %d",
+                    has_error, has_timeout, len(output),
+                )
 
                 return {
                     "output": output,
                     "error": has_error,
+                    "timeout": has_timeout,
                     "message": "ok",
                     "limit_exceeded": False,
                     "service_error": False,
@@ -148,7 +161,16 @@ async def execute_java_code(code: str) -> dict:
     except aiohttp.ClientConnectorError as e:
         logger.error("JDoodle: connection error: %s", e)
     except aiohttp.ServerTimeoutError as e:
-        logger.error("JDoodle: timeout: %s", e)
+        # Our HTTP client timed out waiting for JDoodle — treat as program timeout
+        logger.error("JDoodle: HTTP timeout waiting for response: %s", e)
+        return {
+            "output": "",
+            "error": True,
+            "timeout": True,
+            "message": "http_timeout",
+            "limit_exceeded": False,
+            "service_error": False,
+        }
     except aiohttp.ClientError as e:
         logger.error("JDoodle: client error: %s", e)
     except Exception as e:
@@ -157,6 +179,7 @@ async def execute_java_code(code: str) -> dict:
     return {
         "output": "",
         "error": True,
+        "timeout": False,
         "message": "network_error",
         "limit_exceeded": False,
         "service_error": True,

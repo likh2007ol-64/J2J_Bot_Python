@@ -17,19 +17,49 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-HELP_TEXT = (
-    "Привет! Я Java-робот\n"
-    "Помогаю студентам JUMP2JAVA с теорией и кодом.\n\n"
+START_TEXT = (
+    "Привет! Я J2J_Bot — твой помощник в изучении Java.\n\n"
+    "Задавай любые вопросы по Java — я отвечу на основе всех учебников в моей библиотеке "
+    "(сразу по нескольким книгам). А ещё я умею выполнять твой код и показывать правильное решение, "
+    "если ошибёшься.\n\n"
+    "Я помогу тебе по всей программе:\n"
+    "• Java Core (теория, задачи, разбор ошибок)\n"
+    "• Подготовка к проекту (объясню теорию, покажу примеры кода для Git, Maven, JDBC, Hibernate, Spring)\n"
+    "• Помощь на всех этапах: от первых программ до подготовки к собеседованию\n"
+    "• Ответы на вопросы с указанием источников\n"
+    "• Генерация правильного кода, если ошибешься\n"
+    "• Разбор ошибок и помощь с отладкой\n"
+    "• Вопросы и задачи для собеседования (по материалам библиотеки)\n\n"
+    "Всё это — в одном месте, по твоей программе.\n\n"
     "Команды:\n"
-    "/start, /help — это меню\n"
-    "/about — информация о боте\n"
-    "/run <код> — выполнить Java-код\n"
-    "/explain <задача> — получить эталонное решение\n\n"
-    "Или просто задай вопрос по Java — отвечу по учебникам.\n\n"
-    "Код можно отправить и без /run — просто вставь его в тройные бэктики:\n"
-    "```java\n"
-    "System.out.println(\"Hello\");\n"
-    "```"
+    "/start — приветствие\n"
+    "/help — подробная инструкция\n"
+    "/about — информация о боте"
+)
+
+HELP_TEXT = (
+    "Как пользоваться J2J_Bot\n\n"
+    "Вопросы по теории\n"
+    "Просто напиши свой вопрос на русском или английском. "
+    "Я найду ответ в учебниках и укажу источник (автор, книга, страница).\n\n"
+    "Выполнение Java-кода\n"
+    "Используй команду /run, а после неё напиши код в этой же строке.\n"
+    "Пример: /run System.out.println(\"Hello\");\n\n"
+    "Если в коде ошибка — я сразу выдам правильное решение с объяснением.\n\n"
+    "Не знаешь, как написать код? Попроси меня показать:\n"
+    "/explain Напиши метод, который возвращает сумму двух чисел\n\n"
+    "Если просто написать /explain — я попрошу уточнить задачу.\n\n"
+    "---\n"
+    "Если бот не сможет выполнить код, он объяснит причину:\n\n"
+    "Код слишком большой\n"
+    "→ Разбей на несколько маленьких частей и запусти каждую отдельно командой /run.\n\n"
+    "Программа выполняется слишком долго (возможно, бесконечный цикл)\n"
+    "→ Проверь условия циклов, добавь счётчик или ограничение по времени внутри кода.\n\n"
+    "Код требует ввода с клавиатуры (Scanner, System.in)\n"
+    "→ Используй готовые значения внутри кода (например, int x = 5;) "
+    "или передавай данные через аргументы метода.\n\n"
+    "Вывод программы слишком большой (более 10 000 символов)\n"
+    "→ Сократи вывод — выводи только часть данных, используй условия или выводи результат порциями."
 )
 
 ABOUT_TEXT = (
@@ -172,13 +202,22 @@ async def handle_message(message, bot):
         if handled:
             return
 
-    # /start or /help
-    if lower in ("/start", "/help", "начать"):
-        greeting_attach = images.get_attachment("greeting")
+    # /start
+    if lower in ("/start", "начать"):
+        await bot.api.messages.send(
+            peer_id=peer_id,
+            message=START_TEXT,
+            attachment=images.get_attachment("greeting"),
+            random_id=0,
+        )
+        return
+
+    # /help
+    if lower == "/help":
         await bot.api.messages.send(
             peer_id=peer_id,
             message=HELP_TEXT,
-            attachment=greeting_attach,
+            attachment=images.get_attachment("greeting"),
             random_id=0,
         )
         return
@@ -244,14 +283,28 @@ async def handle_message(message, bot):
 
 # ─── /run handler ────────────────────────────────────────────────────────────
 
+_CODE_SIZE_LIMIT = 10_000   # chars — reject before sending to JDoodle
+_OUTPUT_SIZE_LIMIT = 10_000  # chars — truncate with warning
+_OUTPUT_SHOW_CHARS = 500     # how many chars to show when truncating
+
+# Patterns that indicate interactive input — JDoodle cannot handle these
+_SCANNER_RE = re.compile(r'\bScanner\b|System\.in\b', re.IGNORECASE)
+
+
 async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: str | None = None):
     """Execute Java code via JDoodle.
 
-    If preextracted_code is given it is used directly; otherwise code is
-    extracted from text via _extract_code().
+    Pre-execution checks (before calling JDoodle):
+      1. JDoodle not configured → friendly error
+      2. Code > 10 000 chars    → ask to split
+      3. Scanner / System.in    → ask to use fixed values
+
+    Post-execution checks (on JDoodle result):
+      4. Timeout (TLE / HTTP timeout) → advice, no DeepSeek
+      5. Output > 10 000 chars        → truncate + warning
     """
 
-    # Check if JDoodle is configured
+    # ── 1. JDoodle configured? ────────────────────────────────────────────────
     if not JDOODLE_ENABLED:
         await _send_sad(bot, peer_id,
             "Модуль проверки кода не настроен.\n"
@@ -262,7 +315,7 @@ async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: 
         )
         return
 
-    # Use pre-extracted code if supplied, otherwise extract from text
+    # Extract code (or use pre-extracted)
     code = preextracted_code or _extract_code(text)
     if not code:
         await _send_sad(bot, peer_id,
@@ -272,9 +325,30 @@ async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: 
         )
         return
 
+    # ── 2. Code size check ────────────────────────────────────────────────────
+    if len(code) > _CODE_SIZE_LIMIT:
+        logger.info("Code rejected: too large (%d chars)", len(code))
+        await _send_sad(bot, peer_id,
+            f"Код слишком большой для выполнения в учебной среде ({len(code):,} символов).\n\n"
+            "Попробуй разбить его на несколько маленьких частей "
+            "и запусти каждую отдельно командой /run."
+        )
+        return
+
+    # ── 3. Scanner / System.in check ─────────────────────────────────────────
+    if _SCANNER_RE.search(code):
+        logger.info("Code rejected: contains Scanner/System.in")
+        await _send_sad(bot, peer_id,
+            "Бот не поддерживает программы, которые требуют ввода с клавиатуры "
+            "(Scanner, System.in).\n\n"
+            "Используй готовые значения внутри кода (например, int x = 5;) "
+            "или передавай данные через аргументы метода."
+        )
+        return
+
     await _send_thinking(bot, peer_id)
 
-    # Check daily limit (free plan only)
+    # ── Daily limit check (free plan) ─────────────────────────────────────────
     if JDOODLE_PLAN != "pro":
         count = await database.get_jdoodle_count()
         if count >= JDOODLE_FREE_LIMIT:
@@ -284,7 +358,7 @@ async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: 
             )
             return
 
-    # Execute code
+    # ── Execute via JDoodle ───────────────────────────────────────────────────
     result = await jdoodle.execute_java_code(code)
 
     if result["service_error"]:
@@ -300,6 +374,15 @@ async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: 
         )
         return
 
+    # ── 4. Timeout check ─────────────────────────────────────────────────────
+    if result.get("timeout"):
+        logger.info("JDoodle timeout for user code")
+        await _send_sad(bot, peer_id,
+            "Программа выполняется слишком долго (возможно, бесконечный цикл).\n\n"
+            "Проверь условия циклов, добавь счётчик или ограничение по времени внутри кода."
+        )
+        return
+
     # Count this request (free plan)
     if JDOODLE_PLAN != "pro":
         new_count = await database.increment_jdoodle_count()
@@ -307,18 +390,33 @@ async def _handle_run(message, bot, text: str, peer_id: int, preextracted_code: 
 
     await database.log_operation("run_code", f"error={result['error']}")
 
-    output = result["output"] or "(нет вывода)"
-    if len(output) > 1500:
-        output = output[:1500] + "\n...(вывод обрезан)"
+    raw_output = result["output"] or ""
+
+    # ── 5. Large output check ─────────────────────────────────────────────────
+    output_too_large = len(raw_output) > _OUTPUT_SIZE_LIMIT
+    if output_too_large:
+        logger.info("JDoodle output truncated: %d chars", len(raw_output))
+        output = raw_output[:_OUTPUT_SHOW_CHARS] + (
+            f"\n\n... (вывод обрезан: показано {_OUTPUT_SHOW_CHARS} из {len(raw_output):,} символов)"
+        )
+        await _send_sad(bot, peer_id,
+            f"Вывод программы слишком большой (более {_OUTPUT_SIZE_LIMIT:,} символов). "
+            f"Показаны первые {_OUTPUT_SHOW_CHARS} символов.\n\n"
+            f"{output}\n\n"
+            "Попробуй сократить вывод: выводи только часть данных или используй условия."
+        )
+        return
+
+    output = raw_output or "(нет вывода)"
 
     if not result["error"]:
-        # Success
+        # ── Success ───────────────────────────────────────────────────────────
         await _send_happy(bot, peer_id,
             f"Код выполнен без ошибок. Молодец!\n\nВывод программы:\n{output}"
         )
         return
 
-    # Error — send error message, then generate fix via DeepSeek
+    # ── Error: show error + DeepSeek fix ─────────────────────────────────────
     await bot.api.messages.send(
         peer_id=peer_id,
         message=(
