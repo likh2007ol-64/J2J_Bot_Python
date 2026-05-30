@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+chroma_db/
 bot/data/chroma_db/
 *.db
 *.sqlite
