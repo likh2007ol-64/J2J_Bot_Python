@@ -10,3 +10,4 @@ books/
 .upm/
 .pythonlibs/
 node_modules/
+bot/data/chroma_db/
