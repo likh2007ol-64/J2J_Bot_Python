@@ -2,14 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей (gcc/g++ нужны для некоторых Python-пакетов)
-RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -rf /var/lib/apt/lists/*
+# Устанавливаем системные зависимости, необходимые для сборки chromadb, hnswlib, sentence-transformers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    make \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Копирование и установка зависимостей
+# Копируем requirements.txt и устанавливаем Python-зависимости
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование всего кода
+# Копируем остальной код
 COPY . .
 
 # Команда запуска

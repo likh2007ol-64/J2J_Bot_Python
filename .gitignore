@@ -6,3 +6,9 @@ bot/data/chroma_db/
 *.db
 *.sqlite
 .DS_Store
+node_modules/
+.replit
+.pythonlibs/
+.upm/
+.cache/
+attached_assets/
